@@ -8,6 +8,9 @@ const MODES = [
   "emotion",
   "nextLine",
   "rewriteLine",
+  "synonyms",
+  "antonyms",
+  "poeticNuance",
 ];
 
 function parseLLMJson(text) {
@@ -63,6 +66,24 @@ function buildPrompt(mode, q, contextText, extraPrompt) {
         `You are rewriting a Hinglish song line. The user selected this line:\n"${q}"\n\nSong context (may be partial):\n${contextText || "(no extra context)"}\n\nWrite 5 rewritten alternatives. Keep the same meaning/vibe but improve phrasing, rhythm, imagery. Avoid clichés.\nReturn JSON:\n{"lines":["...","...","...","...","..."]}` +
         extra
       );
+    case "synonyms":
+      return (
+        base +
+        `Give 10 synonyms / close alternatives for this word or short phrase in a songwriter-friendly Hinglish/Hindi vibe. Include a mix of Hinglish and Hindi (Devanagari) where useful. Avoid long explanations.\n\nInput: "${q}"\nReturn JSON:\n{"words":["...","..."]}` +
+        extra
+      );
+    case "antonyms":
+      return (
+        base +
+        `Give 8–10 antonyms / opposites for this word or short phrase, useful for songwriting contrast. Hinglish/Hindi allowed.\n\nInput: "${q}"\nReturn JSON:\n{"words":["...","..."]}` +
+        extra
+      );
+    case "poeticNuance":
+      return (
+        base +
+        `Give a Rekhta-style poetic help for this word/phrase (DO NOT quote any copyrighted lines).\n\nReturn JSON:\n{\n  "meaning":"1-3 short sentences in Hinglish (simple and precise)",\n  "nuance":"1-2 short sentences about poetic vibe/usage",\n  "related_words":["...","...","...","...","..."],\n  "examples":["(original mini-line 1)","(original mini-line 2)"]\n}\n\nInput: "${q}"` +
+        extra
+      );
     default:
       return null;
   }
@@ -115,6 +136,23 @@ async function handleTools({ mode, q, contextText, extraPrompt }) {
         json: {
           mode,
           lines,
+        },
+      };
+    }
+
+    if (mode === "poeticNuance") {
+      return {
+        status: 200,
+        json: {
+          mode,
+          meaning: typeof data.meaning === "string" ? data.meaning : "",
+          nuance: typeof data.nuance === "string" ? data.nuance : "",
+          related_words: Array.isArray(data.related_words)
+            ? data.related_words.filter(Boolean).slice(0, 10)
+            : [],
+          examples: Array.isArray(data.examples)
+            ? data.examples.filter(Boolean).slice(0, 4)
+            : [],
         },
       };
     }

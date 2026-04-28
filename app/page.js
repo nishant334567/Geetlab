@@ -2,13 +2,13 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import {
-  BookOpen,
   Loader2,
-  PenLine,
   Plus,
-  Sparkles,
+  Clock,
+  FileText,
 } from "lucide-react";
 
 function formatDate(iso) {
@@ -63,22 +63,37 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-zinc-100/80 dark:bg-zinc-950">
-      <header className="border-b border-zinc-200/80 bg-white/90 backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/90">
-        <div className="mx-auto flex max-w-3xl flex-col gap-4 px-4 py-8 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="mb-2 inline-flex items-center gap-2 rounded-full bg-violet-100 px-3 py-1 text-xs font-medium text-violet-900 dark:bg-violet-950/60 dark:text-violet-200">
-              <Sparkles className="h-3.5 w-3.5" />
-              GeetLab
+      <main className="mx-auto max-w-6xl px-4 py-10">
+        <div className="mb-10 grid gap-5 rounded-3xl border border-zinc-200/80 bg-white/70 p-5 shadow-sm backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/40 sm:grid-cols-[1fr_auto] sm:items-center sm:p-6">
+          <div className="flex items-center gap-4">
+            <div className="relative h-14 w-14 shrink-0 overflow-hidden rounded-2xl bg-zinc-100 ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-800">
+              <Image
+                src="/geetlab_logo.png"
+                alt="GeetLab"
+                fill
+                className="object-cover scale-[1.08]"
+                priority
+              />
             </div>
-            <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">
-              Your lyrics
-            </h1>
-            <p className="mt-2 max-w-md text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
-              Every idea has its own space. Open one to keep writing — we save
-              as you go.
-            </p>
+            <div className="min-w-0">
+              <h1 className="text-3xl font-bold tracking-tight text-zinc-900 dark:text-zinc-50">
+                Your ideas
+              </h1>
+              <p className="mt-1 max-w-xl text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+                Write. Create. Inspire. Start a new idea or continue an old one.
+              </p>
+            </div>
           </div>
-          <div className="flex shrink-0 flex-col gap-2 sm:items-end">
+
+          <div className="flex flex-col gap-3 sm:items-end">
+            <div className="relative hidden h-12 w-[14.5rem] overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950 sm:block">
+              <Image
+                src="/geetlab_logo_2.png"
+                alt="GeetLab banner"
+                fill
+                className="object-cover"
+              />
+            </div>
             <button
               type="button"
               onClick={handleNewIdea}
@@ -92,18 +107,9 @@ export default function HomePage() {
               )}
               New idea
             </button>
-            <Link
-              href="/daily"
-              className="inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-medium text-zinc-800 transition hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-            >
-              <BookOpen className="h-4 w-4 opacity-70" />
-              Daily inspiration
-            </Link>
           </div>
         </div>
-      </header>
 
-      <main className="mx-auto max-w-3xl px-4 py-10">
         {listError && (
           <p className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/40 dark:bg-red-950/30 dark:text-red-300">
             {listError}
@@ -117,7 +123,6 @@ export default function HomePage() {
           </div>
         ) : ideas.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-zinc-300 bg-white/60 px-6 py-16 text-center dark:border-zinc-700 dark:bg-zinc-900/40">
-            <PenLine className="mx-auto mb-4 h-10 w-10 text-zinc-400" />
             <p className="text-lg font-medium text-zinc-800 dark:text-zinc-200">
               No lyrics yet
             </p>
@@ -139,23 +144,37 @@ export default function HomePage() {
             </button>
           </div>
         ) : (
-          <ul className="space-y-3">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {ideas.map((idea) => (
-              <li key={idea.id}>
-                <Link
-                  href={`/write/${idea.id}`}
-                  className="block rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-sm transition hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
-                >
-                  <p className="line-clamp-2 text-sm font-medium leading-relaxed text-zinc-900 dark:text-zinc-100">
-                    {idea.preview}
-                  </p>
-                  <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-500">
-                    Updated {formatDate(idea.updatedAt)}
-                  </p>
-                </Link>
-              </li>
+              <Link
+                key={idea.id}
+                href={`/write/${idea.id}`}
+                className="group rounded-2xl border border-zinc-200/90 bg-white p-5 shadow-sm transition hover:-translate-y-0.5 hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-700"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <h2 className="line-clamp-1 text-base font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+                    {idea.title || "Untitled idea"}
+                  </h2>
+                  <div className="shrink-0 rounded-full bg-zinc-100 px-2 py-1 text-[11px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                    {idea.wordCount ?? 0} words
+                  </div>
+                </div>
+                <p className="mt-2 line-clamp-3 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+                  {idea.preview}
+                </p>
+                <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-zinc-500 dark:text-zinc-500">
+                  <span className="inline-flex items-center gap-1.5">
+                    <Clock className="h-3.5 w-3.5" />
+                    {formatDate(idea.updatedAt)}
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <FileText className="h-3.5 w-3.5" />
+                    Idea
+                  </span>
+                </div>
+              </Link>
             ))}
-          </ul>
+          </div>
         )}
       </main>
     </div>

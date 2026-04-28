@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { connectDB } from "@/lib/db";
 import Idea from "@/models/Idea";
-import { previewFromHtml } from "@/lib/previewFromHtml";
+import { previewFromHtml, titleFromHtml, wordCountFromHtml } from "@/lib/previewFromHtml";
 
 export async function GET() {
   try {
@@ -13,7 +13,9 @@ export async function GET() {
 
     const list = ideas.map((doc) => ({
       id: doc._id.toString(),
+      title: titleFromHtml(doc.content),
       preview: previewFromHtml(doc.content),
+      wordCount: wordCountFromHtml(doc.content),
       updatedAt: doc.updatedAt,
       createdAt: doc.createdAt,
     }));
