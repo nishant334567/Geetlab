@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import RichTextEditor from "@/app/lib/rte";
+import Metronome from "@/app/components/Metronome";
 import {
   ArrowLeft,
   PenLine,
@@ -14,6 +15,7 @@ import {
   ChevronDown,
   Mic,
   Trash2,
+  ExternalLink,
 } from "lucide-react";
 
 const MODE_OPTIONS = [
@@ -24,6 +26,23 @@ const MODE_OPTIONS = [
 ];
 
 const SAVE_DEBOUNCE_MS = 900;
+
+function rekhtaSlug(q) {
+  return encodeURIComponent(
+    String(q || "")
+      .trim()
+      .toLowerCase()
+      .replace(/['"]/g, "")
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+  );
+}
+
+function rekhtaUrl(q) {
+  const slug = rekhtaSlug(q);
+  if (!slug) return null;
+  return `https://www.rekhtadictionary.com/meaning-of-${slug}`;
+}
 
 function SectionCard({ icon: Icon, title, description, accent = "zinc", children }) {
   const ring =
@@ -95,19 +114,27 @@ export default function WriteWorkspace({ ideaId }) {
   const [result, setResult] = useState(null);
 
   const [selectedText, setSelectedText] = useState("");
+  const [selectionMode, setSelectionMode] = useState("meaning");
   const [selectionLoading, setSelectionLoading] = useState(false);
   const [selectionError, setSelectionError] = useState(null);
-  const [selectionResult, setSelectionResult] = useState(null);
+  const [selectionData, setSelectionData] = useState(null);
+  const [selectionExtra, setSelectionExtra] = useState("");
 
   const [manualOpen, setManualOpen] = useState(true);
   const prevSelectedRef = useRef("");
   const saveTimerRef = useRef(null);
+
+  const [rekhtaQuery, setRekhtaQuery] = useState("");
 
   const [voiceNotes, setVoiceNotes] = useState([]);
   const [vnName, setVnName] = useState("");
   const [vnUploading, setVnUploading] = useState(false);
   const [vnError, setVnError] = useState(null);
   const audioFileRef = useRef(null);
+  const [vnRecording, setVnRecording] = useState(false);
+  const [vnRecordError, setVnRecordError] = useState(null);
+  const mediaRecorderRef = useRef(null);
+  const recordChunksRef = useRef([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -166,6 +193,11 @@ export default function WriteWorkspace({ ideaId }) {
   }, []);
 
   useEffect(() => {
+    // keep Rekhta query in sync with current selection (user can still edit manually)
+    if (selectedText) setRekhtaQuery(selectedText);
+  }, [selectedText]);
+
+  useEffect(() => {
     const prev = prevSelectedRef.current;
     const had = prev.length > 0;
     const has = selectedText.length > 0;
@@ -176,43 +208,58 @@ export default function WriteWorkspace({ ideaId }) {
 
   useEffect(() => {
     if (!selectedText) {
-      setSelectionResult(null);
+      setSelectionData(null);
       setSelectionError(null);
       setSelectionLoading(false);
+      setSelectionExtra("");
+    }
+  }, [selectedText]);
+
+  function plainTextFromHtml(htmlStr) {
+    return String(htmlStr || "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  async function handleSelectionSubmit(e) {
+    e.preventDefault();
+    const q = selectedText.trim();
+    if (!q) {
+      setSelectionError("Select a word/phrase first.");
+      setSelectionData(null);
       return;
     }
 
-    const ac = new AbortController();
     setSelectionLoading(true);
     setSelectionError(null);
-    setSelectionResult(null);
+    setSelectionData(null);
 
-    const params = new URLSearchParams({
-      mode: "selection",
-      q: selectedText,
-    });
-    fetch(`/api/write-tools?${params.toString()}`, { signal: ac.signal })
-      .then((res) => res.json())
-      .then((data) => {
-        if (ac.signal.aborted) return;
-        if (data.error) {
-          setSelectionError(data.error);
-          setSelectionResult(null);
-        } else {
-          setSelectionResult(data);
-        }
-      })
-      .catch((err) => {
-        if (ac.signal.aborted || err.name === "AbortError") return;
-        setSelectionError(err.message || "Failed");
-        setSelectionResult(null);
-      })
-      .finally(() => {
-        if (!ac.signal.aborted) setSelectionLoading(false);
+    try {
+      const contextText =
+        selectionMode === "nextLine" || selectionMode === "rewriteLine"
+          ? plainTextFromHtml(html).slice(0, 1500)
+          : "";
+
+      const res = await fetch("/api/write-tools", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: selectionMode,
+          q,
+          contextText,
+          extraPrompt: selectionExtra,
+        }),
       });
-
-    return () => ac.abort();
-  }, [selectedText]);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Request failed");
+      setSelectionData(data);
+    } catch (err) {
+      setSelectionError(err.message || "Failed");
+    } finally {
+      setSelectionLoading(false);
+    }
+  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -265,6 +312,89 @@ export default function WriteWorkspace({ ideaId }) {
       setVnError(e.message || "Upload failed");
     } finally {
       setVnUploading(false);
+    }
+  }
+
+  async function handleStartRecording() {
+    setVnRecordError(null);
+    setVnError(null);
+
+    if (vnRecording) return;
+    if (typeof window === "undefined" || !navigator?.mediaDevices?.getUserMedia) {
+      setVnRecordError("Recording is not supported in this browser.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferredTypes = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4",
+      ];
+      const mimeType =
+        preferredTypes.find((t) => window.MediaRecorder?.isTypeSupported?.(t)) ||
+        "";
+
+      recordChunksRef.current = [];
+      const mr = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      mediaRecorderRef.current = mr;
+
+      mr.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) recordChunksRef.current.push(ev.data);
+      };
+      mr.onerror = () => {
+        setVnRecordError("Recording error. Please try again.");
+      };
+      mr.onstop = async () => {
+        try {
+          const chunks = recordChunksRef.current;
+          recordChunksRef.current = [];
+          const blob = new Blob(chunks, { type: mr.mimeType || "audio/webm" });
+          const ext = (mr.mimeType || "").includes("mp4") ? "m4a" : "webm";
+          const file = new File([blob], `voice-note.${ext}`, {
+            type: mr.mimeType || "audio/webm",
+          });
+
+          setVnUploading(true);
+          const fd = new FormData();
+          fd.append("name", vnName.trim() || "Voice note");
+          fd.append("file", file);
+          const res = await fetch(`/api/ideas/${ideaId}/voice-notes`, {
+            method: "POST",
+            body: fd,
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "Upload failed");
+          setVoiceNotes((prev) => [...prev, data.voiceNote]);
+          setVnName("");
+        } catch (err) {
+          setVnError(err.message || "Upload failed");
+        } finally {
+          setVnUploading(false);
+          // stop all tracks
+          stream.getTracks().forEach((t) => t.stop());
+          mediaRecorderRef.current = null;
+        }
+      };
+
+      mr.start();
+      setVnRecording(true);
+    } catch (err) {
+      setVnRecordError(
+        err?.name === "NotAllowedError"
+          ? "Mic permission denied. Allow microphone access and retry."
+          : "Could not start recording."
+      );
+    }
+  }
+
+  function handleStopRecording() {
+    if (!vnRecording) return;
+    try {
+      mediaRecorderRef.current?.stop?.();
+    } finally {
+      setVnRecording(false);
     }
   }
 
@@ -360,7 +490,7 @@ export default function WriteWorkspace({ ideaId }) {
 
       <main className="mx-auto max-w-6xl px-4 py-8 sm:py-10">
         <div className="grid gap-8 xl:grid-cols-[1fr_min(22rem,100%)] xl:items-start">
-          <div className="min-w-0 space-y-3">
+          <div className="min-w-0 space-y-6">
             <div className="flex items-center gap-2 text-zinc-700 dark:text-zinc-300">
               <PenLine className="h-4 w-4" strokeWidth={2} />
               <span className="text-sm font-medium">Your draft</span>
@@ -371,62 +501,273 @@ export default function WriteWorkspace({ ideaId }) {
               onWordSelect={handleWordSelect}
               placeholder="Start writing…"
             />
+
+            <Metronome />
+
+            <SectionCard
+              icon={Mic}
+              title="Voice notes"
+              description="Record quick takes while writing. Name each take so you can find it later."
+              accent="emerald"
+            >
+              <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-end">
+                <div>
+                  <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                    Name
+                  </label>
+                  <input
+                    type="text"
+                    value={vnName}
+                    onChange={(e) => setVnName(e.target.value)}
+                    placeholder="e.g. Chorus melody idea"
+                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => (vnRecording ? handleStopRecording() : handleStartRecording())}
+                  disabled={vnUploading}
+                  className={`inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold shadow-sm transition disabled:opacity-50 ${
+                    vnRecording
+                      ? "bg-red-600 text-white hover:bg-red-700 dark:bg-red-500 dark:hover:bg-red-400"
+                      : "bg-emerald-800 text-white hover:bg-emerald-900 dark:bg-emerald-700 dark:hover:bg-emerald-600"
+                  }`}
+                >
+                  <Mic className={`h-4 w-4 ${vnRecording ? "animate-pulse" : ""}`} />
+                  {vnRecording ? "Stop recording" : "Record"}
+                </button>
+              </div>
+
+              {(vnRecordError || vnError) && (
+                <p className="text-sm text-red-600 dark:text-red-400">
+                  {vnRecordError || vnError}
+                </p>
+              )}
+
+              <div className="mt-4 rounded-xl border border-emerald-200/60 bg-white/70 p-4 dark:border-emerald-900/40 dark:bg-zinc-950/40">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                  Recordings
+                </p>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  {voiceNotes.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-emerald-200/70 bg-white/60 p-4 text-sm text-zinc-600 dark:border-emerald-900/40 dark:bg-zinc-950/30 dark:text-zinc-400 sm:col-span-2">
+                      No voice notes yet.
+                    </div>
+                  ) : (
+                    voiceNotes.map((vn) => (
+                      <div
+                        key={vn.id}
+                        className="rounded-xl border border-emerald-200/60 bg-white p-3 shadow-sm dark:border-emerald-900/40 dark:bg-zinc-950/40"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                            {vn.name}
+                          </p>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteVoiceNote(vn.id)}
+                            className="shrink-0 rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+                            aria-label={`Delete ${vn.name}`}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                        {vn.url ? (
+                          <audio
+                            controls
+                            src={vn.url}
+                            className="mt-2 h-10 w-full"
+                            preload="metadata"
+                          />
+                        ) : (
+                          <p className="mt-2 text-xs text-amber-800 dark:text-amber-300">
+                            Playback link unavailable — check GCS credentials and bucket.
+                          </p>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-2">
+                <details className="rounded-xl border border-emerald-200/60 bg-white/60 p-3 dark:border-emerald-900/40 dark:bg-zinc-950/30">
+                  <summary className="cursor-pointer text-sm font-medium text-emerald-900 dark:text-emerald-200">
+                    Upload an audio file (optional)
+                  </summary>
+                  <div className="mt-3 space-y-3">
+                    <input
+                      ref={audioFileRef}
+                      type="file"
+                      accept="audio/*,.webm,.mp3,.m4a,.wav,.ogg"
+                      className="w-full text-sm text-zinc-700 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-emerald-900 dark:text-zinc-300 dark:file:bg-emerald-950 dark:file:text-emerald-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleUploadVoiceNote}
+                      disabled={vnUploading || vnRecording}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-white px-4 py-2.5 text-sm font-semibold text-emerald-900 shadow-sm transition hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-900/40 dark:bg-zinc-950 dark:text-emerald-200 dark:hover:bg-emerald-950/20"
+                    >
+                      {vnUploading ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Uploading…
+                        </>
+                      ) : (
+                        <>
+                          <Mic className="h-4 w-4" />
+                          Upload file
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </details>
+              </div>
+            </SectionCard>
           </div>
 
           <div className="flex flex-col gap-5 xl:sticky xl:top-6 xl:self-start">
             <SectionCard
               icon={MousePointerClick}
               title="From your selection"
-              description="Select a word or short phrase in the editor. We fetch meaning, 3 rhymes, and 3 alternates."
+              description="Select a word or line in the editor, then choose what you want."
               accent="amber"
             >
-              {selectionLoading && (
-                <div className="flex items-center gap-2.5 text-sm text-zinc-600 dark:text-zinc-400">
-                  <Loader2 className="h-4 w-4 animate-spin text-amber-700 dark:text-amber-400" />
-                  <span>Getting ideas for your selection…</span>
-                </div>
-              )}
-              {selectionError && (
-                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300">
-                  {selectionError}
-                </p>
-              )}
-              {!selectionLoading &&
-                !selectionError &&
-                selectedText &&
-                selectionResult && (
-                  <div className="space-y-4">
-                    <div className="inline-flex max-w-full items-center gap-2 rounded-full bg-white/90 px-3 py-1.5 text-xs font-medium text-zinc-800 ring-1 ring-amber-200/80 dark:bg-zinc-900/90 dark:text-zinc-200 dark:ring-amber-900/50">
-                      <span className="truncate" title={selectedText}>
-                        “{selectedText}”
-                      </span>
-                    </div>
-                    {selectionResult.meaning ? (
-                      <div>
-                        <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                          Meaning
-                        </p>
-                        <p className="text-sm leading-relaxed text-zinc-800 dark:text-zinc-200">
-                          {selectionResult.meaning}
-                        </p>
-                      </div>
-                    ) : null}
-                    <ResultList label="Rhymes" items={selectionResult.rhymes} />
-                    <ResultList
-                      label="Alternates"
-                      items={selectionResult.alternates}
-                    />
-                  </div>
-                )}
-              {!selectedText && !selectionLoading && (
+              {!selectedText && (
                 <div className="rounded-xl border border-dashed border-amber-300/60 bg-white/50 px-4 py-8 text-center dark:border-amber-900/40 dark:bg-zinc-950/30">
                   <MousePointerClick className="mx-auto mb-2 h-8 w-8 text-amber-700/50 dark:text-amber-500/40" />
                   <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                    Highlight a word or phrase in the editor to see suggestions
-                    here.
+                    Highlight a word/phrase or a full line in the editor. It
+                    will appear here.
                   </p>
                 </div>
               )}
+
+              {selectedText && (
+                <div className="space-y-4">
+                  <div className="inline-flex max-w-full items-center gap-2 rounded-full bg-white/90 px-3 py-1.5 text-xs font-medium text-zinc-800 ring-1 ring-amber-200/80 dark:bg-zinc-900/90 dark:text-zinc-200 dark:ring-amber-900/50">
+                    <span className="truncate" title={selectedText}>
+                      “{selectedText}”
+                    </span>
+                  </div>
+
+                  <form onSubmit={handleSelectionSubmit} className="space-y-3">
+                    <div>
+                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                        Action
+                      </label>
+                      <select
+                        value={selectionMode}
+                        onChange={(e) => setSelectionMode(e.target.value)}
+                        className="w-full cursor-pointer rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm text-zinc-900 shadow-sm outline-none ring-zinc-400/20 transition-shadow focus:border-amber-400 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-amber-600 dark:focus:ring-amber-900/30"
+                      >
+                        <option value="meaning">Find meaning</option>
+                        <option value="rhyme">Suggest rhyme</option>
+                        <option value="alternates">Alternate words</option>
+                        <option value="nextLine">Suggest next line</option>
+                        <option value="rewriteLine">Rewrite this line</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                        Extra prompt (optional)
+                      </label>
+                      <textarea
+                        value={selectionExtra}
+                        onChange={(e) => setSelectionExtra(e.target.value)}
+                        placeholder="e.g. keep it more conversational, use simple words, make it sad but hopeful…"
+                        rows={3}
+                        className="w-full resize-y rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm text-zinc-900 shadow-sm outline-none ring-zinc-400/20 placeholder:text-zinc-400 focus:border-amber-400 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-amber-600 dark:focus:ring-amber-900/30"
+                      />
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={selectionLoading}
+                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-amber-800 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-900 disabled:opacity-50 dark:bg-amber-700 dark:hover:bg-amber-600"
+                    >
+                      {selectionLoading ? (
+                        <>
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          Thinking…
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="h-4 w-4 opacity-90" />
+                          Run
+                        </>
+                      )}
+                    </button>
+                  </form>
+
+                  {selectionError && (
+                    <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300">
+                      {selectionError}
+                    </p>
+                  )}
+
+                  {selectionData && !selectionError && (
+                    <div className="border-t border-amber-200/60 pt-4 dark:border-amber-900/40">
+                      {selectionData.meaning ? (
+                        <div>
+                          <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                            Meaning
+                          </p>
+                          <p className="text-sm leading-relaxed text-zinc-800 dark:text-zinc-200">
+                            {selectionData.meaning}
+                          </p>
+                        </div>
+                      ) : null}
+
+                      {Array.isArray(selectionData.words) ? (
+                        <ResultList label="Suggestions" items={selectionData.words} />
+                      ) : null}
+
+                      {Array.isArray(selectionData.lines) ? (
+                        <ResultList label="Lines" items={selectionData.lines} />
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              )}
+            </SectionCard>
+
+            <SectionCard
+              icon={ExternalLink}
+              title="Search on Rekhta"
+              description="Open the selected word on Rekhta Dictionary."
+              accent="zinc"
+            >
+              <div className="space-y-3">
+                <div>
+                  <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+                    Word
+                  </label>
+                  <input
+                    type="text"
+                    value={rekhtaQuery}
+                    onChange={(e) => setRekhtaQuery(e.target.value)}
+                    placeholder={selectedText ? "Selected word…" : "Type a word…"}
+                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm text-zinc-900 shadow-sm outline-none ring-zinc-400/20 placeholder:text-zinc-400 focus:border-zinc-300 focus:ring-4 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-zinc-600 dark:focus:ring-zinc-800/40"
+                  />
+        
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const url = rekhtaUrl(rekhtaQuery);
+                    if (!url) return;
+                    window.open(url, "_blank", "noopener,noreferrer");
+                  }}
+                  disabled={!rekhtaUrl(rekhtaQuery)}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-sm font-semibold text-zinc-800 shadow-sm transition hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  Open on Rekhta
+                </button>
+              </div>
             </SectionCard>
 
             <section
@@ -572,102 +913,6 @@ export default function WriteWorkspace({ ideaId }) {
               )}
             </section>
 
-            <SectionCard
-              icon={Mic}
-              title="Voice notes"
-              description="Upload recordings (webm, mp3, m4a, wav, ogg). Give each one a name."
-              accent="emerald"
-            >
-              <div className="space-y-3">
-                {voiceNotes.length === 0 && (
-                  <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                    No voice notes yet — add a take below.
-                  </p>
-                )}
-                {voiceNotes.map((vn) => (
-                  <div
-                    key={vn.id}
-                    className="rounded-xl border border-emerald-200/60 bg-white/80 p-3 dark:border-emerald-900/40 dark:bg-zinc-950/50"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                        {vn.name}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteVoiceNote(vn.id)}
-                        className="shrink-0 rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-red-50 hover:text-red-700 dark:hover:bg-red-950/40 dark:hover:text-red-400"
-                        aria-label={`Delete ${vn.name}`}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                    {vn.url ? (
-                      <audio
-                        controls
-                        src={vn.url}
-                        className="mt-2 h-10 w-full"
-                        preload="metadata"
-                      />
-                    ) : (
-                      <p className="mt-2 text-xs text-amber-800 dark:text-amber-300">
-                        Playback link unavailable — check GCS credentials and
-                        bucket.
-                      </p>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-4 space-y-3 border-t border-emerald-200/60 pt-4 dark:border-emerald-900/40">
-                <div>
-                  <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                    Name
-                  </label>
-                  <input
-                    type="text"
-                    value={vnName}
-                    onChange={(e) => setVnName(e.target.value)}
-                    placeholder="e.g. Chorus melody idea"
-                    className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-                  />
-                </div>
-                <div>
-                  <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                    Audio file
-                  </label>
-                  <input
-                    ref={audioFileRef}
-                    type="file"
-                    accept="audio/*,.webm,.mp3,.m4a,.wav,.ogg"
-                    className="w-full text-sm text-zinc-700 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-100 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-emerald-900 dark:text-zinc-300 dark:file:bg-emerald-950 dark:file:text-emerald-200"
-                  />
-                </div>
-                <button
-                  type="button"
-                  onClick={handleUploadVoiceNote}
-                  disabled={vnUploading}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-800 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-900 disabled:opacity-50 dark:bg-emerald-700 dark:hover:bg-emerald-600"
-                >
-                  {vnUploading ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                      Uploading…
-                    </>
-                  ) : (
-                    <>
-                      <Mic className="h-4 w-4" />
-                      Add voice note
-                    </>
-                  )}
-                </button>
-                {vnError && (
-                  <p className="text-sm text-red-600 dark:text-red-400">
-                    {vnError}
-                  </p>
-                )}
-              </div>
-            </SectionCard>
           </div>
         </div>
       </main>

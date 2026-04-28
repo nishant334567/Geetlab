@@ -6,7 +6,9 @@ import Idea from "@/models/Idea";
 import { uploadToBucket, getSignedReadUrl, bucket } from "@/lib/gcs";
 
 const MAX_BYTES = 25 * 1024 * 1024;
-const AUDIO_RE = /^audio\/(webm|mpeg|mp4|wav|ogg|x-m4a|mp3|aac)$/i;
+// MediaRecorder commonly produces "audio/webm;codecs=opus" (note the ;codecs=...)
+const AUDIO_RE =
+  /^audio\/(webm|mpeg|mp4|wav|ogg|x-m4a|mp3|aac)(?:;.*)?$/i;
 
 function isValidId(id) {
   return mongoose.Types.ObjectId.isValid(id);
